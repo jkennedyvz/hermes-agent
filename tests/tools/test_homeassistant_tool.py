@@ -591,7 +591,7 @@ class TestSummarizeHistory:
         assert result["total_changes"] == 0
         assert "first" not in result
 
-    def test_numeric_summary(self):
+    def test_numeric_summary_no_distinct_states(self):
         result = _summarize_history("sensor.temperature", self.NUMERIC_HISTORY)
         assert result["total_changes"] == 4
         assert result["first"]["state"] == "20.5"
@@ -599,8 +599,10 @@ class TestSummarizeHistory:
         assert result["numeric"]["min"] == 20.5
         assert result["numeric"]["max"] == 22.5
         assert result["numeric"]["average"] == 21.25
+        # Numeric entities should NOT include distinct_states (high cardinality)
+        assert "distinct_states" not in result
 
-    def test_binary_summary(self):
+    def test_binary_summary_has_distinct_states(self):
         result = _summarize_history("binary_sensor.door", self.BINARY_HISTORY)
         assert result["total_changes"] == 5
         assert result["distinct_states"] == {"off": 3, "on": 2}
@@ -610,12 +612,6 @@ class TestSummarizeHistory:
         result = _summarize_history("sensor.temperature", self.NUMERIC_HISTORY)
         assert result["first"]["last_changed"] == "2024-01-15T10:00:00Z"
         assert result["last"]["last_changed"] == "2024-01-15T13:00:00Z"
-
-    def test_distinct_states_counts(self):
-        result = _summarize_history("sensor.temperature", self.NUMERIC_HISTORY)
-        assert result["distinct_states"]["21.0"] == 2
-        assert result["distinct_states"]["20.5"] == 1
-        assert result["distinct_states"]["22.5"] == 1
 
     def test_mixed_numeric_non_numeric(self):
         """Entries like 'unavailable' are skipped for numeric stats."""
@@ -628,14 +624,22 @@ class TestSummarizeHistory:
         assert result["numeric"]["min"] == 10.0
         assert result["numeric"]["max"] == 12.0
         assert result["numeric"]["average"] == 11.0
-        assert result["distinct_states"]["unavailable"] == 1
+        # Has numeric values, so no distinct_states
+        assert "distinct_states" not in result
 
-    def test_single_entry(self):
+    def test_single_entry_non_numeric(self):
         history = [{"state": "on", "last_changed": "2024-01-15T10:00:00Z"}]
         result = _summarize_history("light.x", history)
         assert result["total_changes"] == 1
         assert result["first"]["state"] == "on"
         assert result["last"]["state"] == "on"
+        assert result["distinct_states"] == {"on": 1}
+
+    def test_single_entry_numeric(self):
+        history = [{"state": "21.5", "last_changed": "2024-01-15T10:00:00Z"}]
+        result = _summarize_history("sensor.x", history)
+        assert result["numeric"]["min"] == 21.5
+        assert "distinct_states" not in result
 
 
 class TestHandleGetHistory:
@@ -676,7 +680,6 @@ class TestHandleGetHistory:
             "total_changes": 3,
             "first": {"state": "20.0", "last_changed": "2024-01-15T10:00:00Z"},
             "last": {"state": "22.0", "last_changed": "2024-01-15T12:00:00Z"},
-            "distinct_states": {"20.0": 1, "21.0": 1, "22.0": 1},
             "numeric": {"min": 20.0, "max": 22.0, "average": 21.0},
         }
         result = json.loads(_handle_get_history({
@@ -694,7 +697,6 @@ class TestHandleGetHistory:
             "total_changes": 2,
             "first": {"state": "20.0", "last_changed": "2024-01-15T10:00:00Z"},
             "last": {"state": "21.0", "last_changed": "2024-01-15T11:00:00Z"},
-            "distinct_states": {"20.0": 1, "21.0": 1},
             "numeric": {"min": 20.0, "max": 21.0, "average": 20.5},
             "states": [
                 {"state": "20.0", "last_changed": "2024-01-15T10:00:00Z"},

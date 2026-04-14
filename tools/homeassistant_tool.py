@@ -326,10 +326,6 @@ def _summarize_history(entity_id: str, history: List[Dict[str, Any]]) -> Dict[st
     first = history[0]
     last = history[-1]
 
-    # Count distinct state values
-    from collections import Counter
-    state_counts = Counter(s.get("state") for s in history)
-
     summary: Dict[str, Any] = {
         "entity_id": entity_id,
         "total_changes": len(history),
@@ -341,10 +337,10 @@ def _summarize_history(entity_id: str, history: List[Dict[str, Any]]) -> Dict[st
             "state": last.get("state"),
             "last_changed": last.get("last_changed"),
         },
-        "distinct_states": dict(state_counts),
     }
 
-    # For numeric entities (sensors), add min/max/average
+    # For numeric entities (sensors), add min/max/average instead of
+    # distinct_states — numeric values can have very high cardinality.
     numeric_values: List[float] = []
     for s in history:
         try:
@@ -358,6 +354,12 @@ def _summarize_history(entity_id: str, history: List[Dict[str, Any]]) -> Dict[st
             "max": round(max(numeric_values), 2),
             "average": round(sum(numeric_values) / len(numeric_values), 2),
         }
+    else:
+        # Non-numeric entities (binary sensors, lights, etc.) — low cardinality,
+        # so distinct_states is useful context for the agent.
+        from collections import Counter
+        state_counts = Counter(s.get("state") for s in history)
+        summary["distinct_states"] = dict(state_counts)
 
     return summary
 
