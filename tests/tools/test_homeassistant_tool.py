@@ -694,11 +694,11 @@ class TestHandleGetCameraImage:
             "entity_id": "camera.front_door",
             "mime_type": "image/jpeg",
             "size_bytes": 1024,
-            "image_data_url": "data:image/jpeg;base64,/9j/4AAQ...",
+            "image_path": "/tmp/camera/front_door.jpg",
         }
         result = json.loads(_handle_get_camera_image({"entity_id": "camera.front_door"}))
         assert "result" in result
         assert result["result"]["entity_id"] == "camera.front_door"
         assert result["result"]["mime_type"] == "image/jpeg"
-        assert result["result"]["image_data_url"].startswith("data:image/jpeg;base64,")
+        assert result["result"]["image_path"].endswith(".jpg")
         mock_run.assert_called_once()

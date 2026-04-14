@@ -67,7 +67,7 @@ In addition to built-in tools, Hermes can load tools dynamically from MCP server
 | Tool | Description | Requires environment |
 |------|-------------|----------------------|
 | `ha_call_service` | Call a Home Assistant service to control a device. Use ha_list_services to discover available services and their parameters for each domain. | — |
-| `ha_get_camera_image` | Get a snapshot image from a Home Assistant camera entity. Returns the image as a base64 data URL. | — |
+| `ha_get_camera_image` | Get a snapshot image from a Home Assistant camera entity. Saves the image to disk and returns the file path. | — |
 | `ha_get_history` | Get the state change history for a Home Assistant entity over a time period. Returns a list of state changes with timestamps. | — |
 | `ha_get_state` | Get the detailed state of a single Home Assistant entity, including all attributes (brightness, color, temperature setpoint, sensor readings, etc.). | — |
 | `ha_list_entities` | List Home Assistant entities. Optionally filter by domain (light, switch, climate, sensor, binary_sensor, cover, fan, etc.) or by area name (living room, kitchen, bedroom, etc.). | — |

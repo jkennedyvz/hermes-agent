@@ -146,7 +146,7 @@ Show me the living room temperature over the past 6 hours
 
 ### `ha_get_camera_image`
 
-Get a snapshot image from a Home Assistant camera entity. Returns the image as a base64 data URL.
+Get a snapshot image from a Home Assistant camera entity. Saves the image to disk and returns the file path.
 
 **Parameters:**
 - `entity_id` *(required)* — The camera entity ID, e.g., `camera.front_door`, `camera.backyard`. Must start with `camera.`.

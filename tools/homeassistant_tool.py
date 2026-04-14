@@ -13,11 +13,11 @@ The HA instance URL is read from ``HASS_URL`` (default: http://homeassistant.loc
 """
 
 import asyncio
-import base64
 import json
 import logging
 import os
 import re
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote, urlencode
 
@@ -401,8 +401,25 @@ def _handle_get_history(args: dict, **kw) -> str:
 _CAMERA_ENTITY_RE = re.compile(r"^camera\.[a-z0-9_]+$")
 
 
+_MIME_TO_EXT = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+}
+
+
+def _camera_image_dir() -> Path:
+    """Return (and create) the directory for camera snapshots."""
+    from hermes_constants import get_hermes_home
+
+    d = get_hermes_home() / "tmp" / "camera"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 async def _async_get_camera_image(entity_id: str) -> Dict[str, Any]:
-    """Fetch a camera snapshot image and return it as a base64 data URL."""
+    """Fetch a camera snapshot image and save it to disk."""
     import aiohttp
 
     hass_url, hass_token = _get_config()
@@ -420,17 +437,20 @@ async def _async_get_camera_image(entity_id: str) -> Dict[str, Any]:
 
     # Determine MIME type from Content-Type header (strip charset etc.)
     mime_type = content_type.split(";")[0].strip()
-    if mime_type not in ("image/jpeg", "image/png", "image/gif", "image/webp"):
+    if mime_type not in _MIME_TO_EXT:
         mime_type = "image/jpeg"
 
-    encoded = base64.b64encode(image_bytes).decode("ascii")
-    data_url = f"data:{mime_type};base64,{encoded}"
+    ext = _MIME_TO_EXT[mime_type]
+    # Name: camera entity without "camera." prefix, e.g. "front_door.jpg"
+    name = entity_id.split(".", 1)[1]
+    dest = _camera_image_dir() / f"{name}{ext}"
+    dest.write_bytes(image_bytes)
 
     return {
         "entity_id": entity_id,
         "mime_type": mime_type,
         "size_bytes": len(image_bytes),
-        "image_data_url": data_url,
+        "image_path": str(dest),
     }
 
 
@@ -689,8 +709,8 @@ HA_GET_CAMERA_IMAGE_SCHEMA = {
     "name": "ha_get_camera_image",
     "description": (
         "Get a snapshot image from a Home Assistant camera entity. "
-        "Returns the image as a base64 data URL. Use this to see what a camera "
-        "is currently showing (e.g. front door camera, baby monitor, etc.)."
+        "Saves the image to disk and returns the file path. Use this to see "
+        "what a camera is currently showing (e.g. front door camera, baby monitor, etc.)."
     ),
     "parameters": {
         "type": "object",
