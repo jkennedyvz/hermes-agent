@@ -48,7 +48,7 @@ Home Assistant will appear as a connected platform alongside any other messaging
 
 ## Available Tools
 
-Hermes Agent registers four tools for smart home control:
+Hermes Agent registers six tools for smart home control:
 
 ### `ha_list_entities`
 
@@ -118,6 +118,44 @@ Set the thermostat to 22 degrees in heat mode
 Set living room lights to blue at 50% brightness
 → ha_call_service(domain="light", service="turn_on",
     entity_id="light.living_room", data={"brightness": 128, "color_name": "blue"})
+```
+
+### `ha_get_history`
+
+Get the state change history for an entity over a time period. Useful for checking when a door was last opened, temperature trends, motion history, etc.
+
+**Parameters:**
+- `entity_id` *(required)* — The entity to get history for, e.g., `sensor.temperature`, `binary_sensor.front_door`
+- `start_time` *(optional)* — Start of the period in ISO-8601 format, e.g., `2024-01-15T10:00:00+00:00`. Defaults to 1 day ago.
+- `end_time` *(optional)* — End of the period in ISO-8601 format. Defaults to now.
+- `minimal_response` *(optional, default: true)* — Only return `last_changed` and `state` for intermediate entries, reducing response size.
+- `significant_changes_only` *(optional, default: false)* — Only return entries where the state actually changed.
+
+**Examples:**
+
+```
+When was the front door last opened?
+→ ha_get_history(entity_id="binary_sensor.front_door")
+```
+
+```
+Show me the living room temperature over the past 6 hours
+→ ha_get_history(entity_id="sensor.living_room_temperature",
+    start_time="2024-01-15T12:00:00Z", end_time="2024-01-15T18:00:00Z")
+```
+
+### `ha_get_camera_image`
+
+Get a snapshot image from a Home Assistant camera entity. Returns the image as a base64 data URL.
+
+**Parameters:**
+- `entity_id` *(required)* — The camera entity ID, e.g., `camera.front_door`, `camera.backyard`. Must start with `camera.`.
+
+**Example:**
+
+```
+Show me what the front door camera sees
+→ ha_get_camera_image(entity_id="camera.front_door")
 ```
 
 ## Gateway Platform: Real-Time Events
