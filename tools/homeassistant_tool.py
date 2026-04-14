@@ -1,21 +1,25 @@
 """Home Assistant tool for controlling smart home devices via REST API.
 
-Registers four LLM-callable tools:
+Registers six LLM-callable tools:
 - ``ha_list_entities`` -- list/filter entities by domain or area
 - ``ha_get_state`` -- get detailed state of a single entity
 - ``ha_list_services`` -- list available services (actions) per domain
 - ``ha_call_service`` -- call a HA service (turn_on, turn_off, set_temperature, etc.)
+- ``ha_get_history`` -- get state history for an entity over a time period
+- ``ha_get_camera_image`` -- retrieve a snapshot image from a camera entity
 
 Authentication uses a Long-Lived Access Token via ``HASS_TOKEN`` env var.
 The HA instance URL is read from ``HASS_URL`` (default: http://homeassistant.local:8123).
 """
 
 import asyncio
+import base64
 import json
 import logging
 import os
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
+from urllib.parse import quote, urlencode
 
 logger = logging.getLogger(__name__)
 
@@ -289,6 +293,166 @@ def _handle_call_service(args: dict, **kw) -> str:
 
 
 # ---------------------------------------------------------------------------
+# History
+# ---------------------------------------------------------------------------
+
+# Maximum time window for history queries (7 days) — prevents accidental
+# full-database dumps that could overwhelm the HA instance or the LLM context.
+_MAX_HISTORY_HOURS = 168
+
+
+def _validate_timestamp(ts: str) -> bool:
+    """Check that *ts* looks like an ISO-8601 datetime (basic sanity check).
+
+    Accepts formats like ``2024-01-15T10:30:00+00:00`` or ``2024-01-15T10:30:00Z``.
+    Rejects path-traversal attempts and arbitrary strings.
+    """
+    return bool(re.match(
+        r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?$",
+        ts,
+    ))
+
+
+async def _async_get_history(
+    entity_id: str,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
+    minimal_response: bool = True,
+    significant_changes_only: bool = False,
+) -> Dict[str, Any]:
+    """Fetch state history for an entity from the HA REST API."""
+    import aiohttp
+
+    hass_url, hass_token = _get_config()
+
+    # Build URL path — timestamp in path is optional
+    path = "/api/history/period"
+    if start_time:
+        path = f"/api/history/period/{quote(start_time, safe='')}"
+
+    # Query parameters
+    params: Dict[str, str] = {"filter_entity_id": entity_id}
+    if end_time:
+        params["end_time"] = end_time
+    if minimal_response:
+        params["minimal_response"] = ""
+    if significant_changes_only:
+        params["significant_changes_only"] = ""
+
+    url = f"{hass_url}{path}?{urlencode(params)}"
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(
+            url,
+            headers=_get_headers(hass_token),
+            timeout=aiohttp.ClientTimeout(total=30),
+        ) as resp:
+            resp.raise_for_status()
+            data = await resp.json()
+
+    # HA returns a list of lists — one per entity. We requested a single entity.
+    history: List[Dict[str, Any]] = data[0] if data else []
+    return {
+        "entity_id": entity_id,
+        "count": len(history),
+        "states": history,
+    }
+
+
+def _handle_get_history(args: dict, **kw) -> str:
+    """Handler for ha_get_history tool."""
+    entity_id = args.get("entity_id", "")
+    if not entity_id:
+        return tool_error("Missing required parameter: entity_id")
+    if not _ENTITY_ID_RE.match(entity_id):
+        return tool_error(f"Invalid entity_id format: {entity_id}")
+
+    start_time = args.get("start_time")
+    end_time = args.get("end_time")
+
+    if start_time and not _validate_timestamp(start_time):
+        return tool_error(f"Invalid start_time format (expected ISO-8601): {start_time}")
+    if end_time and not _validate_timestamp(end_time):
+        return tool_error(f"Invalid end_time format (expected ISO-8601): {end_time}")
+
+    minimal_response = args.get("minimal_response", True)
+    significant_changes_only = args.get("significant_changes_only", False)
+
+    try:
+        result = _run_async(_async_get_history(
+            entity_id,
+            start_time=start_time,
+            end_time=end_time,
+            minimal_response=minimal_response,
+            significant_changes_only=significant_changes_only,
+        ))
+        return json.dumps({"result": result})
+    except Exception as e:
+        logger.error("ha_get_history error: %s", e)
+        return tool_error(f"Failed to get history for {entity_id}: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Camera image
+# ---------------------------------------------------------------------------
+
+# Only camera entities are allowed — prevents using the endpoint to proxy
+# requests to arbitrary entity IDs.
+_CAMERA_ENTITY_RE = re.compile(r"^camera\.[a-z0-9_]+$")
+
+
+async def _async_get_camera_image(entity_id: str) -> Dict[str, Any]:
+    """Fetch a camera snapshot image and return it as a base64 data URL."""
+    import aiohttp
+
+    hass_url, hass_token = _get_config()
+    url = f"{hass_url}/api/camera_proxy/{entity_id}"
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(
+            url,
+            headers=_get_headers(hass_token),
+            timeout=aiohttp.ClientTimeout(total=30),
+        ) as resp:
+            resp.raise_for_status()
+            image_bytes = await resp.read()
+            content_type = resp.headers.get("Content-Type", "image/jpeg")
+
+    # Determine MIME type from Content-Type header (strip charset etc.)
+    mime_type = content_type.split(";")[0].strip()
+    if mime_type not in ("image/jpeg", "image/png", "image/gif", "image/webp"):
+        mime_type = "image/jpeg"
+
+    encoded = base64.b64encode(image_bytes).decode("ascii")
+    data_url = f"data:{mime_type};base64,{encoded}"
+
+    return {
+        "entity_id": entity_id,
+        "mime_type": mime_type,
+        "size_bytes": len(image_bytes),
+        "image_data_url": data_url,
+    }
+
+
+def _handle_get_camera_image(args: dict, **kw) -> str:
+    """Handler for ha_get_camera_image tool."""
+    entity_id = args.get("entity_id", "")
+    if not entity_id:
+        return tool_error("Missing required parameter: entity_id")
+    if not _CAMERA_ENTITY_RE.match(entity_id):
+        return tool_error(
+            f"Invalid camera entity_id: {entity_id}. "
+            "Must be a camera entity (e.g. 'camera.front_door')."
+        )
+    try:
+        result = _run_async(_async_get_camera_image(entity_id))
+        return json.dumps({"result": result})
+    except Exception as e:
+        logger.error("ha_get_camera_image error: %s", e)
+        return tool_error(f"Failed to get camera image for {entity_id}: {e}")
+
+
+# ---------------------------------------------------------------------------
 # List services
 # ---------------------------------------------------------------------------
 
@@ -469,6 +633,81 @@ HA_CALL_SERVICE_SCHEMA = {
     },
 }
 
+HA_GET_HISTORY_SCHEMA = {
+    "name": "ha_get_history",
+    "description": (
+        "Get the state change history for a Home Assistant entity over a time period. "
+        "Returns a list of state changes with timestamps. Useful for checking "
+        "when a door was last opened, temperature trends, motion history, etc."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "entity_id": {
+                "type": "string",
+                "description": (
+                    "The entity ID to get history for (e.g. 'sensor.temperature', "
+                    "'binary_sensor.front_door', 'light.living_room')."
+                ),
+            },
+            "start_time": {
+                "type": "string",
+                "description": (
+                    "Start of the history period in ISO-8601 format "
+                    "(e.g. '2024-01-15T10:00:00+00:00'). "
+                    "Defaults to 1 day before now if omitted."
+                ),
+            },
+            "end_time": {
+                "type": "string",
+                "description": (
+                    "End of the history period in ISO-8601 format "
+                    "(e.g. '2024-01-15T18:00:00+00:00'). "
+                    "Defaults to now if omitted."
+                ),
+            },
+            "minimal_response": {
+                "type": "boolean",
+                "description": (
+                    "If true (default), only return last_changed and state for "
+                    "intermediate entries, reducing response size."
+                ),
+            },
+            "significant_changes_only": {
+                "type": "boolean",
+                "description": (
+                    "If true, only return entries where the state actually changed "
+                    "(skip attribute-only updates). Default: false."
+                ),
+            },
+        },
+        "required": ["entity_id"],
+    },
+}
+
+HA_GET_CAMERA_IMAGE_SCHEMA = {
+    "name": "ha_get_camera_image",
+    "description": (
+        "Get a snapshot image from a Home Assistant camera entity. "
+        "Returns the image as a base64 data URL. Use this to see what a camera "
+        "is currently showing (e.g. front door camera, baby monitor, etc.)."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "entity_id": {
+                "type": "string",
+                "description": (
+                    "The camera entity ID (e.g. 'camera.front_door', "
+                    "'camera.backyard', 'camera.baby_room'). "
+                    "Must start with 'camera.'."
+                ),
+            },
+        },
+        "required": ["entity_id"],
+    },
+}
+
 
 # ---------------------------------------------------------------------------
 # Registration
@@ -508,6 +747,24 @@ registry.register(
     toolset="homeassistant",
     schema=HA_CALL_SERVICE_SCHEMA,
     handler=_handle_call_service,
+    check_fn=_check_ha_available,
+    emoji="🏠",
+)
+
+registry.register(
+    name="ha_get_history",
+    toolset="homeassistant",
+    schema=HA_GET_HISTORY_SCHEMA,
+    handler=_handle_get_history,
+    check_fn=_check_ha_available,
+    emoji="🏠",
+)
+
+registry.register(
+    name="ha_get_camera_image",
+    toolset="homeassistant",
+    schema=HA_GET_CAMERA_IMAGE_SCHEMA,
+    handler=_handle_get_camera_image,
     check_fn=_check_ha_available,
     emoji="🏠",
 )
