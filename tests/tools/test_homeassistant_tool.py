@@ -14,6 +14,7 @@ from tools.homeassistant_tool import (
     _filter_and_summarize,
     _build_service_payload,
     _parse_service_response,
+    _summarize_history,
     _get_headers,
     _handle_get_state,
     _handle_call_service,
@@ -567,6 +568,76 @@ class TestTimestampValidation:
 # ---------------------------------------------------------------------------
 
 
+class TestSummarizeHistory:
+    """Tests for the _summarize_history helper that distils raw HA data."""
+
+    NUMERIC_HISTORY = [
+        {"state": "20.5", "last_changed": "2024-01-15T10:00:00Z"},
+        {"state": "21.0", "last_changed": "2024-01-15T11:00:00Z"},
+        {"state": "22.5", "last_changed": "2024-01-15T12:00:00Z"},
+        {"state": "21.0", "last_changed": "2024-01-15T13:00:00Z"},
+    ]
+
+    BINARY_HISTORY = [
+        {"state": "off", "last_changed": "2024-01-15T08:00:00Z"},
+        {"state": "on", "last_changed": "2024-01-15T09:30:00Z"},
+        {"state": "off", "last_changed": "2024-01-15T09:31:00Z"},
+        {"state": "on", "last_changed": "2024-01-15T14:00:00Z"},
+        {"state": "off", "last_changed": "2024-01-15T14:01:00Z"},
+    ]
+
+    def test_empty_history(self):
+        result = _summarize_history("sensor.x", [])
+        assert result["total_changes"] == 0
+        assert "first" not in result
+
+    def test_numeric_summary(self):
+        result = _summarize_history("sensor.temperature", self.NUMERIC_HISTORY)
+        assert result["total_changes"] == 4
+        assert result["first"]["state"] == "20.5"
+        assert result["last"]["state"] == "21.0"
+        assert result["numeric"]["min"] == 20.5
+        assert result["numeric"]["max"] == 22.5
+        assert result["numeric"]["average"] == 21.25
+
+    def test_binary_summary(self):
+        result = _summarize_history("binary_sensor.door", self.BINARY_HISTORY)
+        assert result["total_changes"] == 5
+        assert result["distinct_states"] == {"off": 3, "on": 2}
+        assert "numeric" not in result
+
+    def test_first_last_timestamps(self):
+        result = _summarize_history("sensor.temperature", self.NUMERIC_HISTORY)
+        assert result["first"]["last_changed"] == "2024-01-15T10:00:00Z"
+        assert result["last"]["last_changed"] == "2024-01-15T13:00:00Z"
+
+    def test_distinct_states_counts(self):
+        result = _summarize_history("sensor.temperature", self.NUMERIC_HISTORY)
+        assert result["distinct_states"]["21.0"] == 2
+        assert result["distinct_states"]["20.5"] == 1
+        assert result["distinct_states"]["22.5"] == 1
+
+    def test_mixed_numeric_non_numeric(self):
+        """Entries like 'unavailable' are skipped for numeric stats."""
+        history = [
+            {"state": "10.0", "last_changed": "2024-01-15T10:00:00Z"},
+            {"state": "unavailable", "last_changed": "2024-01-15T11:00:00Z"},
+            {"state": "12.0", "last_changed": "2024-01-15T12:00:00Z"},
+        ]
+        result = _summarize_history("sensor.x", history)
+        assert result["numeric"]["min"] == 10.0
+        assert result["numeric"]["max"] == 12.0
+        assert result["numeric"]["average"] == 11.0
+        assert result["distinct_states"]["unavailable"] == 1
+
+    def test_single_entry(self):
+        history = [{"state": "on", "last_changed": "2024-01-15T10:00:00Z"}]
+        result = _summarize_history("light.x", history)
+        assert result["total_changes"] == 1
+        assert result["first"]["state"] == "on"
+        assert result["last"]["state"] == "on"
+
+
 class TestHandleGetHistory:
     def test_missing_entity_id(self):
         result = json.loads(_handle_get_history({}))
@@ -599,38 +670,44 @@ class TestHandleGetHistory:
         assert "end_time" in result["error"]
 
     @patch("tools.homeassistant_tool._run_async")
-    def test_valid_call_dispatches(self, mock_run):
+    def test_summary_returned_by_default(self, mock_run):
         mock_run.return_value = {
             "entity_id": "sensor.temperature",
-            "count": 2,
+            "total_changes": 3,
+            "first": {"state": "20.0", "last_changed": "2024-01-15T10:00:00Z"},
+            "last": {"state": "22.0", "last_changed": "2024-01-15T12:00:00Z"},
+            "distinct_states": {"20.0": 1, "21.0": 1, "22.0": 1},
+            "numeric": {"min": 20.0, "max": 22.0, "average": 21.0},
+        }
+        result = json.loads(_handle_get_history({
+            "entity_id": "sensor.temperature",
+        }))
+        assert "result" in result
+        assert result["result"]["total_changes"] == 3
+        assert "states" not in result["result"]
+        mock_run.assert_called_once()
+
+    @patch("tools.homeassistant_tool._run_async")
+    def test_include_details_returns_states(self, mock_run):
+        mock_run.return_value = {
+            "entity_id": "sensor.temperature",
+            "total_changes": 2,
+            "first": {"state": "20.0", "last_changed": "2024-01-15T10:00:00Z"},
+            "last": {"state": "21.0", "last_changed": "2024-01-15T11:00:00Z"},
+            "distinct_states": {"20.0": 1, "21.0": 1},
+            "numeric": {"min": 20.0, "max": 21.0, "average": 20.5},
             "states": [
-                {"state": "21.5", "last_changed": "2024-01-15T10:00:00Z"},
-                {"state": "22.0", "last_changed": "2024-01-15T11:00:00Z"},
+                {"state": "20.0", "last_changed": "2024-01-15T10:00:00Z"},
+                {"state": "21.0", "last_changed": "2024-01-15T11:00:00Z"},
             ],
         }
         result = json.loads(_handle_get_history({
             "entity_id": "sensor.temperature",
-            "start_time": "2024-01-15T10:00:00Z",
-            "end_time": "2024-01-15T18:00:00Z",
+            "include_details": True,
         }))
         assert "result" in result
-        assert result["result"]["count"] == 2
-        mock_run.assert_called_once()
-
-    @patch("tools.homeassistant_tool._run_async")
-    def test_minimal_response_default_true(self, mock_run):
-        mock_run.return_value = {"entity_id": "sensor.x", "count": 0, "states": []}
-        _handle_get_history({"entity_id": "sensor.temperature"})
-        # Inspect the coroutine arguments passed to _run_async
-        mock_run.assert_called_once()
-
-    @patch("tools.homeassistant_tool._run_async")
-    def test_significant_changes_passthrough(self, mock_run):
-        mock_run.return_value = {"entity_id": "sensor.x", "count": 0, "states": []}
-        _handle_get_history({
-            "entity_id": "sensor.temperature",
-            "significant_changes_only": True,
-        })
+        assert "states" in result["result"]
+        assert len(result["result"]["states"]) == 2
         mock_run.assert_called_once()
 
 

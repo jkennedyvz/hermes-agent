@@ -122,26 +122,35 @@ Set living room lights to blue at 50% brightness
 
 ### `ha_get_history`
 
-Get the state change history for an entity over a time period. Useful for checking when a door was last opened, temperature trends, motion history, etc.
+Get state history for an entity. By default returns a compact summary optimised for AI agents: total change count, first/last state with timestamps, distinct state values with counts, and numeric min/max/average for sensors. Set `include_details=true` to also get the full state change list.
 
 **Parameters:**
 - `entity_id` *(required)* — The entity to get history for, e.g., `sensor.temperature`, `binary_sensor.front_door`
 - `start_time` *(optional)* — Start of the period in ISO-8601 format, e.g., `2024-01-15T10:00:00+00:00`. Defaults to 1 day ago.
 - `end_time` *(optional)* — End of the period in ISO-8601 format. Defaults to now.
-- `minimal_response` *(optional, default: true)* — Only return `last_changed` and `state` for intermediate entries, reducing response size.
-- `significant_changes_only` *(optional, default: false)* — Only return entries where the state actually changed.
+- `include_details` *(optional, default: false)* — Include the full list of state changes alongside the summary.
 
 **Examples:**
 
 ```
 When was the front door last opened?
 → ha_get_history(entity_id="binary_sensor.front_door")
+  Returns: {total_changes: 5, first: {state: "off", ...}, last: {state: "off", ...},
+            distinct_states: {"off": 3, "on": 2}}
 ```
 
 ```
 Show me the living room temperature over the past 6 hours
 → ha_get_history(entity_id="sensor.living_room_temperature",
     start_time="2024-01-15T12:00:00Z", end_time="2024-01-15T18:00:00Z")
+  Returns: {total_changes: 12, first: ..., last: ...,
+            numeric: {min: 20.5, max: 23.1, average: 21.8}}
+```
+
+```
+I need the exact timestamps for every state change
+→ ha_get_history(entity_id="binary_sensor.front_door", include_details=true)
+  Returns: summary + states: [{state: "off", last_changed: "..."}, ...]
 ```
 
 ### `ha_get_camera_image`

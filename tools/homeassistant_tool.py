@@ -313,14 +313,67 @@ def _validate_timestamp(ts: str) -> bool:
     ))
 
 
+def _summarize_history(entity_id: str, history: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Distil a raw HA history list into a compact summary for LLM consumption.
+
+    Returns total change count, first/last state with timestamps, the set of
+    distinct state values with how often each appeared, and — for numeric
+    sensors — min/max/average.
+    """
+    if not history:
+        return {"entity_id": entity_id, "total_changes": 0}
+
+    first = history[0]
+    last = history[-1]
+
+    # Count distinct state values
+    from collections import Counter
+    state_counts = Counter(s.get("state") for s in history)
+
+    summary: Dict[str, Any] = {
+        "entity_id": entity_id,
+        "total_changes": len(history),
+        "first": {
+            "state": first.get("state"),
+            "last_changed": first.get("last_changed"),
+        },
+        "last": {
+            "state": last.get("state"),
+            "last_changed": last.get("last_changed"),
+        },
+        "distinct_states": dict(state_counts),
+    }
+
+    # For numeric entities (sensors), add min/max/average
+    numeric_values: List[float] = []
+    for s in history:
+        try:
+            numeric_values.append(float(s["state"]))
+        except (ValueError, TypeError, KeyError):
+            continue
+
+    if numeric_values:
+        summary["numeric"] = {
+            "min": round(min(numeric_values), 2),
+            "max": round(max(numeric_values), 2),
+            "average": round(sum(numeric_values) / len(numeric_values), 2),
+        }
+
+    return summary
+
+
 async def _async_get_history(
     entity_id: str,
     start_time: Optional[str] = None,
     end_time: Optional[str] = None,
-    minimal_response: bool = True,
-    significant_changes_only: bool = False,
+    include_details: bool = False,
 ) -> Dict[str, Any]:
-    """Fetch state history for an entity from the HA REST API."""
+    """Fetch state history for an entity from the HA REST API.
+
+    By default returns a compact summary (change count, first/last state,
+    distinct values, numeric min/max/avg).  Set *include_details=True* to
+    also return the full list of state changes.
+    """
     import aiohttp
 
     hass_url, hass_token = _get_config()
@@ -330,14 +383,15 @@ async def _async_get_history(
     if start_time:
         path = f"/api/history/period/{quote(start_time, safe='')}"
 
-    # Query parameters
-    params: Dict[str, str] = {"filter_entity_id": entity_id}
+    # Query parameters — always request minimal_response + significant_changes_only
+    # from HA to keep the payload small; the summary provides the useful stats.
+    params: Dict[str, str] = {
+        "filter_entity_id": entity_id,
+        "minimal_response": "",
+        "significant_changes_only": "",
+    }
     if end_time:
         params["end_time"] = end_time
-    if minimal_response:
-        params["minimal_response"] = ""
-    if significant_changes_only:
-        params["significant_changes_only"] = ""
 
     url = f"{hass_url}{path}?{urlencode(params)}"
 
@@ -352,11 +406,12 @@ async def _async_get_history(
 
     # HA returns a list of lists — one per entity. We requested a single entity.
     history: List[Dict[str, Any]] = data[0] if data else []
-    return {
-        "entity_id": entity_id,
-        "count": len(history),
-        "states": history,
-    }
+    result = _summarize_history(entity_id, history)
+
+    if include_details:
+        result["states"] = history
+
+    return result
 
 
 def _handle_get_history(args: dict, **kw) -> str:
@@ -375,16 +430,14 @@ def _handle_get_history(args: dict, **kw) -> str:
     if end_time and not _validate_timestamp(end_time):
         return tool_error(f"Invalid end_time format (expected ISO-8601): {end_time}")
 
-    minimal_response = args.get("minimal_response", True)
-    significant_changes_only = args.get("significant_changes_only", False)
+    include_details = args.get("include_details", False)
 
     try:
         result = _run_async(_async_get_history(
             entity_id,
             start_time=start_time,
             end_time=end_time,
-            minimal_response=minimal_response,
-            significant_changes_only=significant_changes_only,
+            include_details=include_details,
         ))
         return json.dumps({"result": result})
     except Exception as e:
@@ -656,9 +709,10 @@ HA_CALL_SERVICE_SCHEMA = {
 HA_GET_HISTORY_SCHEMA = {
     "name": "ha_get_history",
     "description": (
-        "Get the state change history for a Home Assistant entity over a time period. "
-        "Returns a list of state changes with timestamps. Useful for checking "
-        "when a door was last opened, temperature trends, motion history, etc."
+        "Get state history for a Home Assistant entity. By default returns a "
+        "compact summary: total change count, first/last state with timestamps, "
+        "distinct state values with counts, and numeric min/max/average for "
+        "sensors. Set include_details=true to also get the full state list."
     ),
     "parameters": {
         "type": "object",
@@ -686,18 +740,11 @@ HA_GET_HISTORY_SCHEMA = {
                     "Defaults to now if omitted."
                 ),
             },
-            "minimal_response": {
+            "include_details": {
                 "type": "boolean",
                 "description": (
-                    "If true (default), only return last_changed and state for "
-                    "intermediate entries, reducing response size."
-                ),
-            },
-            "significant_changes_only": {
-                "type": "boolean",
-                "description": (
-                    "If true, only return entries where the state actually changed "
-                    "(skip attribute-only updates). Default: false."
+                    "If true, include the full list of state changes in the "
+                    "response alongside the summary. Default: false (summary only)."
                 ),
             },
         },
